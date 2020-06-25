@@ -24,6 +24,9 @@ from ..deberta import GPT2Tokenizer
 from ..utils import *
 from ..utils import xtqdm as tqdm
 from .task_registry import tasks
+import onnxruntime
+from onnxruntime.capi.ort_trainer import ORTTrainer, IODescription, ModelDescription, LossScaler
+from onnxruntime.capi.ort_trainer import generate_sample, save_checkpoint, load_checkpoint
 
 from ..training import DistributedTrainer, initialize_distributed, batch_to, set_random_seed,kill_children
 from ..data import DistributedBatchSampler, SequentialSampler, BatchSampler, AsyncDataLoader
@@ -217,6 +220,11 @@ def run_predict(args, model, device, eval_data, prefix=None):
       if predict_fn:
         predict_fn(predicts, args.output_dir, name, prefix)
 
+def run_onnx_conversion(args, model, device, eval_data, prefix=None):
+  # Run converion to ONNX
+  trainer = ORTTrainer(model)
+  trainer.eval_step((eval_data), fetches=['probability'])
+
 def main(args):
   if not args.do_train and not args.do_eval and not args.do_predict:
     raise ValueError("At least one of `do_train` or `do_eval` or `do_predict` must be True.")
@@ -257,6 +265,9 @@ def main(args):
   if args.do_predict:
     run_predict(args, model, device, test_data, prefix=args.tag)
 
+  if args.do_convert:
+    run_onnx_conversion(args, model, device, test_data, prefix=args.tag)
+
 def build_argument_parser():
   parser = argparse.ArgumentParser()
 
@@ -296,6 +307,10 @@ def build_argument_parser():
             default=False,
             action='store_true',
             help="Whether to run prediction on the test set.")
+  parser.add_argument("--do_convert",
+            default=False,
+            action='store_true',
+            help="Whether to convert model to ONNX.")
   parser.add_argument("--train_batch_size",
             default=32,
             type=int,
