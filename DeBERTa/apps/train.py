@@ -222,7 +222,20 @@ def run_predict(args, model, device, eval_data, prefix=None):
 
 def run_onnx_conversion(args, model, device, eval_data, prefix=None):
   # Run converion to ONNX
-  trainer = ORTTrainer(model)
+  def loss_fn(trainer, model, data):
+    _, loss = model(**data)
+    return loss.mean(), data['input_ids'].size(0)
+
+  input_desc = IODescription('x', [2, 2], torch.float32)
+  label_desc = IODescription('label', [2, ], torch.int64, num_classes=4)
+  output_desc = IODescription('output', [2, 4], torch.float32)
+  loss_desc = IODescription('loss', [], torch.float32)
+  model_desc = ModelDescription([input_desc, label_desc], [loss_desc, output_desc])
+
+  trainer = ORTTrainer(
+    model, loss_fn, model_desc, "SGDOptimizer", None,
+    IODescription('Learning_Rate', [1, ], torch.float32), device)
+
   trainer.eval_step((eval_data), fetches=['probability'])
 
 def main(args):
@@ -266,7 +279,7 @@ def main(args):
     run_predict(args, model, device, test_data, prefix=args.tag)
 
   if args.do_convert:
-    run_onnx_conversion(args, model, device, test_data, prefix=args.tag)
+    run_onnx_conversion(args, model, device, eval_data, prefix=args.tag)
 
 def build_argument_parser():
   parser = argparse.ArgumentParser()
