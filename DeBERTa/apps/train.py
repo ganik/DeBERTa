@@ -279,7 +279,7 @@ def main(args):
     run_predict(args, model, device, test_data, prefix=args.tag)
 
   if args.do_convert:
-    run_onnx_conversion(args, model, device, test_data, prefix=args.tag)
+    run_onnx_conversion(args, model, device, eval_data, prefix=args.tag)
 
 def build_argument_parser():
   parser = argparse.ArgumentParser()
