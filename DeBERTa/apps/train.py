@@ -220,22 +220,68 @@ def run_predict(args, model, device, eval_data, prefix=None):
       if predict_fn:
         predict_fn(predicts, args.output_dir, name, prefix)
 
+def bert_model_description(args):
+    vocab_size = 30528
+
+    # allow variable input sizes:
+    # input_ids_desc = IODescription('input_ids', ['batch', 'max_seq_len_in_batch'], torch.int64, num_classes = vocab_size)
+    # segment_ids_desc = IODescription('segment_ids', ['batch', 'max_seq_len_in_batch'], torch.int64, num_classes = 2)
+    # input_mask_desc = IODescription('input_mask', ['batch', 'max_seq_len_in_batch'], torch.int64, num_classes = 2)
+    # masked_lm_labels_desc = IODescription('masked_lm_labels', ['batch', 'max_seq_len_in_batch'], torch.int64, num_classes = vocab_size)
+    # next_sentence_labels_desc = IODescription('next_sentence_labels', ['batch',], torch.int64, num_classes = 2)
+
+    # set concrete input sizes to permit optimization
+    micro_batch = args.train_batch_size // args.gradient_accumulation_steps
+    input_ids_desc = IODescription('input_ids', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = vocab_size)
+    segment_ids_desc = IODescription('segment_ids', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = 2)
+    input_mask_desc = IODescription('input_mask', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = 2)
+    masked_lm_labels_desc = IODescription('masked_lm_labels', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = vocab_size)
+    next_sentence_labels_desc = IODescription('next_sentence_labels', [args.train_batch_size,2], torch.int64, num_classes = 2)
+
+    loss_desc = IODescription('loss', [], torch.float32)
+    return ModelDescription([input_ids_desc, segment_ids_desc, input_mask_desc, masked_lm_labels_desc, next_sentence_labels_desc], [loss_desc])
+
+
+def create_ort_trainer(args, device, model):
+    # set GPU memory limitation
+    from onnxruntime.capi._pybind_state import set_cuda_mem_limit
+    ort_cuda_mem_limit_in_gbs = args.gpu_memory_limit_gb
+    set_cuda_mem_limit(int(ort_cuda_mem_limit_in_gbs * 1024 * 1024 *1024))
+
+    # BertLAMB default initial settings: b1=0.9, b2=0.999, e=1e-6
+    def map_optimizer_attributes(name):
+        no_decay_keys = ["bias", "gamma", "beta", "LayerNorm"]
+        no_decay = False
+        for no_decay_key in no_decay_keys:
+            if no_decay_key in name:
+                no_decay = True
+                break
+        if no_decay:
+            return {"alpha": 0.9, "beta": 0.999, "lambda": 0.0, "epsilon": 1e-6}
+        else:
+            return {"alpha": 0.9, "beta": 0.999, "lambda": 0.01, "epsilon": 1e-6}
+
+    # we request ORTTrainer to create a LambOptimizer with given optimizer_attributes. 
+    # train_step does forward, backward, and optimize step.
+    model = ORTTrainer(model, None, bert_model_description(args), "LambOptimizer", 
+        map_optimizer_attributes,
+        IODescription('Learning_Rate', [1,], torch.float32),
+        device,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        world_rank=args.world_rank, world_size=args.world_size,
+        use_mixed_precision = True if args.fp16 else False,
+        allreduce_post_accumulation = True if args.allreduce_post_accumulation else False,
+        partition_optimizer = True if args.partition_optimizer else False,
+        _opset_version = 10)
+
+    if args.fp16:
+        setattr(args, 'ort_loss_scale', LossScaler(model.loss_scale_input_name, True, up_scale_window=2000))
+
+    return model
+  
 def run_onnx_conversion(args, model, device, eval_data, prefix=None):
   # Run converion to ONNX
-  def loss_fn(trainer, model, data):
-    _, loss = model(**data)
-    return loss.mean(), data['input_ids'].size(0)
-
-  input_desc = IODescription('x', [2, 2], torch.float32)
-  label_desc = IODescription('label', [2, ], torch.int64, num_classes=4)
-  output_desc = IODescription('output', [2, 4], torch.float32)
-  loss_desc = IODescription('loss', [], torch.float32)
-  model_desc = ModelDescription([input_desc, label_desc], [loss_desc, output_desc])
-
-  trainer = ORTTrainer(
-    model, loss_fn, model_desc, "SGDOptimizer", None,
-    IODescription('Learning_Rate', [1, ], torch.float32), device)
-
+  trainer = create_ort_trainer(args, device, model)
   trainer.eval_step((eval_data), fetches=['probability'])
 
 def main(args):
