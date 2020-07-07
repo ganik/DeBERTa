@@ -14,6 +14,7 @@ from collections import OrderedDict, Mapping, Sequence
 import argparse
 import random
 import time
+import pdb
 
 import numpy as np
 import math
@@ -145,6 +146,7 @@ def calc_metrics(predicts, labels, eval_loss, eval_item, eval_results, args, nam
 
 def run_eval(args, model, device, eval_data, prefix=None, tag=None, steps=None):
   # Run prediction for full data
+  return
   prefix = f'{tag}_{prefix}' if tag is not None else prefix
   eval_results=OrderedDict()
   eval_metric=0
@@ -231,7 +233,6 @@ def bert_model_description(args):
     # next_sentence_labels_desc = IODescription('next_sentence_labels', ['batch',], torch.int64, num_classes = 2)
 
     # set concrete input sizes to permit optimization
-    micro_batch = args.train_batch_size // args.gradient_accumulation_steps
     input_ids_desc = IODescription('input_ids', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = vocab_size)
     segment_ids_desc = IODescription('segment_ids', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = 2)
     input_mask_desc = IODescription('input_mask', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = 2)
@@ -245,7 +246,7 @@ def bert_model_description(args):
 def create_ort_trainer(args, device, model):
     # set GPU memory limitation
     from onnxruntime.capi._pybind_state import set_cuda_mem_limit
-    ort_cuda_mem_limit_in_gbs = args.gpu_memory_limit_gb
+    ort_cuda_mem_limit_in_gbs = 1
     set_cuda_mem_limit(int(ort_cuda_mem_limit_in_gbs * 1024 * 1024 *1024))
 
     # BertLAMB default initial settings: b1=0.9, b2=0.999, e=1e-6
@@ -267,11 +268,6 @@ def create_ort_trainer(args, device, model):
         map_optimizer_attributes,
         IODescription('Learning_Rate', [1,], torch.float32),
         device,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        world_rank=args.world_rank, world_size=args.world_size,
-        use_mixed_precision = True if args.fp16 else False,
-        allreduce_post_accumulation = True if args.allreduce_post_accumulation else False,
-        partition_optimizer = True if args.partition_optimizer else False,
         _opset_version = 10)
 
     if args.fp16:
@@ -282,7 +278,20 @@ def create_ort_trainer(args, device, model):
 def run_onnx_conversion(args, model, device, eval_data, prefix=None):
   # Run converion to ONNX
   trainer = create_ort_trainer(args, device, model)
-  trainer.eval_step((eval_data), fetches=['probability'])
+  no_tqdm = True if os.getenv('NO_TQDM', '0')!='0' else False  
+  for eval_item in eval_data:
+    eval_sampler = SequentialSampler(len(eval_item.data))
+    batch_sampler = BatchSampler(eval_sampler, args.eval_batch_size)
+    batch_sampler = DistributedBatchSampler(batch_sampler, rank=args.rank, world_size=args.world_size)
+    eval_dataloader = DataLoader(eval_item.data, batch_sampler=batch_sampler, num_workers=args.workers)
+    for batch in tqdm(AsyncDataLoader(eval_dataloader), ncols=80, desc='Evaluating: {}'.format(prefix), disable=no_tqdm):
+      batch = batch_to(batch, device)
+      with torch.no_grad():
+        ganik = open(os.path.join(args.output_dir, 'ganik.log'), 'w', encoding='utf-8')
+        #pdb.Pdb(stdout=ganik).set_trace()
+        #pdb.set_trace()
+        trainer.eval_step(batch['input_ids'])
+        #logits, tmp_eval_loss = model(**batch)
 
 def main(args):
   if not args.do_train and not args.do_eval and not args.do_predict:
