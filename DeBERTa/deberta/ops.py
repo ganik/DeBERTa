@@ -85,7 +85,7 @@ def get_mask(input, local_context):
 
   if dropout>0 and mask is None:
     if version.Version(torch.__version__) >= version.Version('1.2.0a'):
-      mask=(1-torch.empty_like(input).bernoulli_(1-dropout)).bool()
+      mask=(1-torch.empty_like(input).bernoulli_(1-dropout)).bool() # issue, bernoulli is not available. Mitigation: replace
     else:
       mask=(1-torch.empty_like(input).bernoulli_(1-dropout)).byte()
   
@@ -96,26 +96,32 @@ def get_mask(input, local_context):
   return mask, dropout
 
 @traceable
-class XDropout(torch.autograd.Function):
+# See OnnxDropout node.
+class XDropout(torch.autograd.Function):  # issue, should inherit torch.nn.Module
   @staticmethod
   def forward(ctx, input, local_ctx):
     mask, dropout = get_mask(input, local_ctx)
     ctx.scale=1.0/(1-dropout)
     if dropout>0:
-      ctx.save_for_backward(mask)
+      ctx.save_for_backward(mask) # issue, this makes graph statefull, this is not supported now.
       return input.masked_fill(mask, 0)*ctx.scale
     else:
       return input
 
   @staticmethod
-  def backward(ctx, grad_output):
+  def backward(ctx, grad_output): # no need to define backward, as ORT will define and creates backward graph
     if ctx.scale > 1:
       mask, = ctx.saved_tensors
       return grad_output.masked_fill(mask, 0)*ctx.scale, None
     else:
       return grad_output, None
 
-class StableDropout(torch.nn.Module):
+class StableDropout(torch.nn.Dropout):
+  def __init__(self, drop_prob):
+      super().__init__()
+
+
+class StableDropout1(torch.nn.Module):
   """ Optimized dropout module for stabilizing the training
 
   Args:
